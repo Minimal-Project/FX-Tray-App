@@ -395,7 +395,7 @@ func openSettingsWindow() {
 	// Hauptfenster
 	_, err := MainWindow{
 		AssignTo: &mainWindow,
-		Title:    "FX Tray Settings",
+		Title:    "FX Tray Settings – v" + version,
 
 		Size:    Size{Width: 290, Height: 380},
 		MinSize: Size{Width: 250, Height: 300},

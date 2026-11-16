@@ -37,6 +37,9 @@ var (
 	openSettingsChan = make(chan struct{}, 1)
 )
 
+// Version, beim Build gesetzt via: -ldflags "-X main.version=1.1.0"
+var version = "dev"
+
 // Tray-Setup
 func main() {
 	runtime.LockOSThread()
@@ -69,6 +72,10 @@ func onReady() {
 
 	systray.SetTitle("FX Tray")
 	systray.SetTooltip("Loading FX rates...")
+
+	mVersion := systray.AddMenuItem("FX Tray v"+version, "Installed version")
+	mVersion.Disable()
+	systray.AddSeparator()
 
 	mSettings := systray.AddMenuItem("Settings…", "Open settings window")
 	mRefresh := systray.AddMenuItem("Refresh Rates", "Manually refresh FX rates")
