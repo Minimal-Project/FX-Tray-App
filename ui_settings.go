@@ -483,6 +483,10 @@ func openSettingsWindow() {
 	}.Run()
 
 	if err != nil {
+		walk.MsgBox(nil, "FX Tray",
+			"Settings window could not be opened:\n"+err.Error()+
+				"\n\nOpening fxtray.json in Notepad instead.",
+			walk.MsgBoxIconWarning)
 
 		// Fallback
 		url := "file://" + configPath
