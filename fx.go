@@ -12,6 +12,13 @@ import (
 	"github.com/getlantern/systray"
 )
 
+type frankfurterRate struct {
+	Date  string  `json:"date"`
+	Base  string  `json:"base"`
+	Quote string  `json:"quote"`
+	Rate  float64 `json:"rate"`
+}
+
 func init() {
 	beeep.AppName = "FX Tray App"
 }
@@ -94,8 +101,11 @@ func refreshRatesAndTooltip() error {
 // API Call
 
 func fetchRates(base string) (*rateResponse, error) {
-	url := fmt.Sprintf("https://open.er-api.com/v6/latest/%s", strings.ToUpper(base))
-	resp, err := http.Get(url)
+	base = strings.ToUpper(base)
+	url := fmt.Sprintf("https://api.frankfurter.dev/v2/rates?base=%s", base)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -106,15 +116,21 @@ func fetchRates(base string) (*rateResponse, error) {
 		return nil, fmt.Errorf("fx api: status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var rr rateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rr); err != nil {
+	// v2 liefert ein flaches Array: eine Zeile pro Zielwährung
+	var rows []frankfurterRate
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
 		return nil, err
 	}
-	if rr.Result != "success" {
-		return nil, fmt.Errorf("fx api returned result=%s", rr.Result)
+
+	rr := &rateResponse{BaseCode: base, Rates: make(map[string]float64, len(rows))}
+	for _, r := range rows {
+		rr.Rates[strings.ToUpper(r.Quote)] = r.Rate
+	}
+	if len(rr.Rates) == 0 {
+		return nil, fmt.Errorf("fx api: no rates for base %s", base)
 	}
 
-	return &rr, nil
+	return rr, nil
 }
 
 // Alarm

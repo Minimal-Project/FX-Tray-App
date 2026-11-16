@@ -27,11 +27,9 @@ type Config struct {
 	Alarms []Alarm        `json:"alarms"`
 }
 
-// Antwort API https://open.er-api.com/v6/latest/{BASE}
 type rateResponse struct {
-	Result   string             `json:"result"`
-	BaseCode string             `json:"base_code"`
-	Rates    map[string]float64 `json:"rates"`
+	BaseCode string
+	Rates    map[string]float64
 }
 
 // Config-Datei
