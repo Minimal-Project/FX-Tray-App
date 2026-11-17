@@ -1,31 +1,21 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gen2brain/beeep"
 	"github.com/getlantern/systray"
 )
 
-type frankfurterRate struct {
-	Date  string  `json:"date"`
-	Base  string  `json:"base"`
-	Quote string  `json:"quote"`
-	Rate  float64 `json:"rate"`
-}
-
 func init() {
 	beeep.AppName = "FX Tray App"
 }
 
-// Kurs-Update
+const maxTooltipLen = 127
 
-// Config laden, Kurse aktualisieren
 func updateLoop() {
 	for {
 		if err := loadConfig(); err != nil {
@@ -35,13 +25,37 @@ func updateLoop() {
 			fmt.Println("refreshRates:", err)
 		}
 
-		setNextAutoUpdate()
-		time.Sleep(defaultInterval)
+		interval := currentInterval()
+		setNextAutoUpdate(interval)
+
+		select {
+		case <-time.After(interval):
+		case <-refreshNowChan:
+		}
 	}
 }
 
-// Kurse holen, Tooltip aktualisieren, Alarme prüfen
+func requestRefresh() {
+	select {
+	case refreshNowChan <- struct{}{}:
+	default:
+	}
+}
+
+func currentInterval() time.Duration {
+	configMu.RLock()
+	m := currentConfig.IntervalMinutes
+	configMu.RUnlock()
+	if m < 1 {
+		return defaultInterval
+	}
+	return time.Duration(m) * time.Minute
+}
+
 func refreshRatesAndTooltip() error {
+	refreshMu.Lock()
+	defer refreshMu.Unlock()
+
 	configMu.RLock()
 	cfg := currentConfig
 	configMu.RUnlock()
@@ -51,93 +65,72 @@ func refreshRatesAndTooltip() error {
 		return nil
 	}
 
-	bases := map[string]struct{}{}
-	for _, p := range cfg.Pairs {
-		bases[strings.ToUpper(p.From)] = struct{}{}
+	quotes, err := fetchQuotes(cfg.Pairs)
+	if err != nil {
+		ratesMu.RLock()
+		have := len(rates) > 0
+		ratesMu.RUnlock()
+		if have {
+			systray.SetTooltip(truncateTooltip("⚠ offline – last rates:\n" + lastTooltipBody))
+		} else {
+			systray.SetTooltip("No rates available")
+		}
+		return err
 	}
 
-	tmpRates := map[string]float64{}
-
-	for base := range bases {
-		rr, err := fetchRates(base)
-		if err != nil {
-			return err
-		}
-
-		for _, p := range cfg.Pairs {
-			if strings.ToUpper(p.From) != base {
-				continue
-			}
-			key := pairKey(p.From, p.To)
-			if rate, ok := rr.Rates[strings.ToUpper(p.To)]; ok {
-				tmpRates[key] = rate
-			}
-		}
+	newRates := map[string]float64{}
+	for k, q := range quotes {
+		newRates[k] = q.Rate
 	}
 
 	ratesMu.Lock()
-	rates = tmpRates
+	prev := rates
+	rates = newRates
+	lastQuotes = quotes
+	lastSuccess = time.Now()
 	ratesMu.Unlock()
 
 	var lines []string
 	for _, p := range cfg.Pairs {
 		key := pairKey(p.From, p.To)
-		if rate, ok := tmpRates[key]; ok {
-			lines = append(lines, fmt.Sprintf("%s: %.4f", key, rate))
+		q, ok := quotes[key]
+		if !ok {
+			continue
 		}
+		arrow := ""
+		if old, ok := prev[key]; ok {
+			switch {
+			case q.Rate > old:
+				arrow = " ▲"
+			case q.Rate < old:
+				arrow = " ▼"
+			}
+		}
+		lines = append(lines, fmt.Sprintf("%s %.4f%s", key, q.Rate, arrow))
 	}
 
 	if len(lines) == 0 {
 		systray.SetTooltip("No rates available")
 	} else {
-		systray.SetTooltip(strings.Join(lines, "\n"))
+		lastTooltipBody = strings.Join(lines, "\n")
+		systray.SetTooltip(truncateTooltip(lastTooltipBody))
 	}
 
-	checkAlarms(cfg, tmpRates)
-
+	checkAlarms(cfg, newRates)
 	return nil
 }
 
-// API Call
-
-func fetchRates(base string) (*rateResponse, error) {
-	base = strings.ToUpper(base)
-	url := fmt.Sprintf("https://api.frankfurter.dev/v2/rates?base=%s", base)
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, err
+func truncateTooltip(s string) string {
+	u := utf16.Encode([]rune(s))
+	if len(u) <= maxTooltipLen {
+		return s
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("fx api: status %d: %s", resp.StatusCode, string(body))
-	}
-
-	// v2 liefert ein flaches Array: eine Zeile pro Zielwährung
-	var rows []frankfurterRate
-	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
-		return nil, err
-	}
-
-	rr := &rateResponse{BaseCode: base, Rates: make(map[string]float64, len(rows))}
-	for _, r := range rows {
-		rr.Rates[strings.ToUpper(r.Quote)] = r.Rate
-	}
-	if len(rr.Rates) == 0 {
-		return nil, fmt.Errorf("fx api: no rates for base %s", base)
-	}
-
-	return rr, nil
+	return string(utf16.Decode(u[:maxTooltipLen-1])) + "…"
 }
 
-// Alarm
+const alarmHysteresis = 0.001
 
 func checkAlarms(cfg Config, latest map[string]float64) {
-	now := time.Now()
-
 	for _, a := range cfg.Alarms {
 		key := normalizeAlarmPair(a.Pair)
 		rate, ok := latest[key]
@@ -146,39 +139,36 @@ func checkAlarms(cfg Config, latest map[string]float64) {
 		}
 
 		dir := strings.ToLower(strings.TrimSpace(a.Direction))
-		trigKey := fmt.Sprintf("%s:%.4f:%s", key, a.Target, dir)
+		trigKey := fmt.Sprintf("%s:%.6f:%s", key, a.Target, dir)
 
-		shouldFire := false
+		var hit, rearm bool
 		switch dir {
 		case "above":
-			if rate >= a.Target {
-				shouldFire = true
-			}
+			hit = rate >= a.Target
+			rearm = rate < a.Target*(1-alarmHysteresis)
 		case "below":
-			if rate <= a.Target {
-				shouldFire = true
-			}
+			hit = rate <= a.Target
+			rearm = rate > a.Target*(1+alarmHysteresis)
 		default:
 			continue
 		}
 
 		triggeredMu.Lock()
-		lastTime, exists := lastTriggered[trigKey]
-		canTrigger := !exists || now.Sub(lastTime) >= alarmCooldown
-
-		if shouldFire && canTrigger {
-			lastTriggered[trigKey] = now
+		armed := !alarmFired[trigKey]
+		if hit && armed {
+			alarmFired[trigKey] = true
 			triggeredMu.Unlock()
 
 			msg := fmt.Sprintf("%s is now %.4f (target %.4f %s)", key, rate, a.Target, dir)
 			_ = beeep.Notify("FX Alarm", msg, "")
-		} else {
-			triggeredMu.Unlock()
+			continue
 		}
+		if rearm {
+			delete(alarmFired, trigKey)
+		}
+		triggeredMu.Unlock()
 	}
 }
-
-// Helper
 
 func normalizeAlarmPair(pair string) string {
 	pair = strings.ToUpper(strings.TrimSpace(pair))

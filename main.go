@@ -4,6 +4,8 @@ import (
 	_ "embed"
 	"fmt"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,11 +32,16 @@ var (
 	nextAutoUpdate time.Time
 	rates          = map[string]float64{}
 
-	triggeredMu   sync.Mutex
-	lastTriggered = map[string]time.Time{}
-	alarmCooldown = 5 * time.Minute
+	refreshMu       sync.Mutex
+	lastQuotes      = map[string]Quote{}
+	lastSuccess     time.Time
+	lastTooltipBody string
+
+	triggeredMu sync.Mutex
+	alarmFired  = map[string]bool{}
 
 	openSettingsChan = make(chan struct{}, 1)
+	refreshNowChan   = make(chan struct{}, 1)
 )
 
 // Version, beim Build gesetzt via: -ldflags "-X main.version=1.1.0"
@@ -131,21 +138,14 @@ func onReady() {
 	// Manueller Refresh
 	go func() {
 		for range mRefresh.ClickedCh {
-			if err := refreshRatesAndTooltip(); err != nil {
-				fmt.Println("manual refresh:", err)
-			}
-			updateLastUpdated(mLastUpdated)
-			setNextAutoUpdate()
+			requestRefresh()
 		}
 	}()
 
-	// Anzeige "Last Updated"
 	go func() {
-		updateLastUpdated(mLastUpdated)
-
 		for {
-			time.Sleep(30 * time.Second)
 			updateLastUpdated(mLastUpdated)
+			time.Sleep(5 * time.Second)
 		}
 	}()
 
@@ -157,10 +157,10 @@ func onExit() {
 
 // Auto-Update
 
-func setNextAutoUpdate() {
+func setNextAutoUpdate(interval time.Duration) {
 	nextUpdateMu.Lock()
 	defer nextUpdateMu.Unlock()
-	nextAutoUpdate = time.Now().Add(defaultInterval)
+	nextAutoUpdate = time.Now().Add(interval)
 }
 
 func getNextAutoUpdate() time.Time {
@@ -170,6 +170,29 @@ func getNextAutoUpdate() time.Time {
 }
 
 func updateLastUpdated(m *systray.MenuItem) {
-	now := time.Now().Format("15:04:05")
-	m.SetTitle("Last Updated: " + now)
+	ratesMu.RLock()
+	ts := lastSuccess
+	var sources []string
+	seen := map[string]bool{}
+	var oldest time.Time
+	for _, q := range lastQuotes {
+		if !seen[q.Source] {
+			seen[q.Source] = true
+			sources = append(sources, q.Source)
+		}
+		if oldest.IsZero() || q.Time.Before(oldest) {
+			oldest = q.Time
+		}
+	}
+	ratesMu.RUnlock()
+
+	if ts.IsZero() {
+		m.SetTitle("Last Updated: N/A")
+		return
+	}
+	sort.Strings(sources)
+	m.SetTitle(fmt.Sprintf("Last Updated: %s (%s)", ts.Format("15:04:05"), strings.Join(sources, ", ")))
+	if !oldest.IsZero() {
+		m.SetTooltip("Oldest quote from " + oldest.Local().Format("02.01.2006 15:04"))
+	}
 }

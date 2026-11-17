@@ -23,13 +23,9 @@ type Alarm struct {
 
 // Config definition
 type Config struct {
-	Pairs  []CurrencyPair `json:"pairs"`
-	Alarms []Alarm        `json:"alarms"`
-}
-
-type rateResponse struct {
-	BaseCode string
-	Rates    map[string]float64
+	Pairs           []CurrencyPair `json:"pairs"`
+	Alarms          []Alarm        `json:"alarms"`
+	IntervalMinutes int            `json:"intervalMinutes,omitempty"`
 }
 
 // Config-Datei

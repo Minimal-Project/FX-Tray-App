@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -357,6 +356,7 @@ func openSettingsWindow() {
 	// Speichern
 	saveFunc := func() {
 		var newCfg Config
+		newCfg.IntervalMinutes = cfg.IntervalMinutes
 
 		for _, p := range pairModel.items {
 			newCfg.Pairs = append(newCfg.Pairs, CurrencyPair{
@@ -385,11 +385,7 @@ func openSettingsWindow() {
 		}()
 
 		// Nach Speichern Kurse neu laden
-		go func() {
-			if err := refreshRatesAndTooltip(); err != nil {
-				fmt.Println("refresh after save:", err)
-			}
-		}()
+		requestRefresh()
 	}
 
 	// Hauptfenster
